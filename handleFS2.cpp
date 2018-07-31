@@ -100,7 +100,7 @@ public:
         sem_init(&semHistory, 0, 1);
         n_entries = 0;
     }
-    virtual ~cacheLineHistory(){
+    ~cacheLineHistory(){
         sem_destroy(&semHistory);
     }
 
