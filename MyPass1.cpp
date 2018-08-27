@@ -39,8 +39,8 @@
 using namespace llvm;
 
 static const size_t nAccessSizes = 5;
-static size_t typeSize2accessSizeIndex(uint32_t typeSize);
-static size_t countTrailingZeros_32(uint32_t size);
+static size_t typeSize2accessSizeIndex(uint64_t typeSize);
+//static size_t countTrailingZeros_32(uint32_t size);
 //access size:1/2/4/8/16 bytes 
 
 namespace {
@@ -49,22 +49,28 @@ namespace {
 
     static char ID; // Pass identification, replacement for typeid
 	LLVMContext *context;
-	DataLayout *TD;
-	int longSize;
-	Type* intptrType;
-	Function *ctorFunction;
- 	Function* accessCallback[2][nAccessSizes];// save 10 callbacks
+	Type* intPtrType;
+
+//	DataLayout *TD;
+//	int longSize;
+//	Type* intptrType;
+//	Function *ctorFunction;
+ 	Function* accessCallbacks[2][nAccessSizes];// save 10 callbacks
 
     MyPass1() : FunctionPass(ID) {}
 
-    virtual bool doInitialization(Module &M);
-	virtual bool doFinalization(Module &M);
-    Value* isInterestingMemoryAccess(Instruction *ins, bool *isWrite);
-    void instrumentMemoryAccess(Instruction *ins);
-    void instrumentSpecificAccess(Instruction *ins, IRBuilder<> &IRB, Value *addr, uint32_t typeSize, bool isWrite);
-    Instruction* insertAccessCallback( Instruction *insertBefore, Value *addr, bool isWrite, size_t accessSizeArrayIndex);
-	Function* checkInterfaceFunction(Constant *FuncOrBitcast);
-    bool runOnFunction(Function &F) override {
+    bool doInitialization(Module &M) override;
+	bool doFinalization(Module &M) override;
+	void initializeCallbacks(Module &M);
+
+    Value *isInterestingMemoryAccess(Instruction *ins, bool *isWrite, uint64_t *typeSize);
+    bool instrumentMemAccess(Instruction *ins);
+	bool runOnFunction(Function &F) override;
+//	void instrumentMemAccessInline(Value *addrLong, bool isWrite, unsigned accessSizeIndex, Instruction *insertBefore);
+//  void instrumentSpecificAccess(Instruction *ins, IRBuilder<> &IRB, Value *addr, uint32_t typeSize, bool isWrite);
+//  Instruction* insertAccessCallback( Instruction *insertBefore, Value *addr, bool isWrite, size_t accessSizeArrayIndex);
+//	Function* checkInterfaceFunction(Constant *FuncOrBitcast);
+ /*   bool runOnFunction(Function &F) override {
 	  errs() << "Function Name:    " << F.getName() << "\n";
 //	  int pointerSize = TD -> getPointerSizeInBits();
 	  for(Function::iterator bb = F.begin(), FE = F.end(); bb != FE; ++bb ){
@@ -110,7 +116,7 @@ namespace {
 			}
 	  }
       return false;
-    }
+    }*/
   };
 }
 
@@ -120,20 +126,23 @@ namespace {
 //initialize accessCallback[2][5]
 bool MyPass1::doInitialization(Module &M){
 	context = &(M.getContext());
-	longSize = TD->getPointerSizeInBits();
-	intptrType = Type::getIntNTy(*context, longSize);
+	auto &DL = M.getDataLayout();
+	IRBuilder<> IRB(*context);
+	intPtrType = IRB.getIntPtrTy(DL);
+//	longSize = TD->getPointerSizeInBits();
+//	intptrType = Type::getIntNTy(*context, longSize);
 
-	ctorFunction = Function::Create(FunctionType::get(Type::getVoidTy(*context), false),GlobalValue::InternalLinkage, "MyPass1", &M);
-	BasicBlock *ctorBB = BasicBlock::Create(*context, "", ctorFunction);
-	Instruction * ctorinsertBefore = ReturnInst::Create(*context, ctorBB);
-	IRBuilder<> IRB(ctorinsertBefore);
+//	ctorFunction = Function::Create(FunctionType::get(Type::getVoidTy(*context), false),GlobalValue::InternalLinkage, "MyPass1", &M);
+//	BasicBlock *ctorBB = BasicBlock::Create(*context, "", ctorFunction);
+//	Instruction * ctorinsertBefore = ReturnInst::Create(*context, ctorBB);
+//	IRBuilder<> IRB(ctorinsertBefore);
 
-	Constant *hookFunc;
-	Function *hook;
+//	Constant *hookFunc;
+//	Function *hook;
 //	TD = getAnalysisIfAvailable<DataLayout>();
 //	if(!TD)
 //		return false;
-	for(size_t isWriteAccess = 0; isWriteAccess <= 1; isWriteAccess++){
+/*	for(size_t isWriteAccess = 0; isWriteAccess <= 1; isWriteAccess++){
 		for(size_t accessSizeIndex = 0; accessSizeIndex < nAccessSizes; accessSizeIndex++){
 			std::string funcName;
 			if(isWriteAccess){
@@ -144,43 +153,70 @@ bool MyPass1::doInitialization(Module &M){
 
 			}
 		//	funcOrBitCast = M.getOrInsertFunction(funcName, IRB.getVoidTy(), intptrType, NULL);
-			/* parameters of getOrInsertFunction????*/
+			// parameters of getOrInsertFunction????
 			hookFunc = M.getOrInsertFunction(funcName, IRB.getVoidTy(), NULL);
 			hook = cast<Function>(hookFunc);
 			accessCallback[isWriteAccess][accessSizeIndex] = hook;
    		//	accessCallback[isWriteAccess][accessSizeIndex] = checkInterfaceFunction(M.getOrInsertFunction(funcName, IRB.getVoidTy(), intptrType, NULL));
 		}
-	}
-
+	}*/
+    return true;
 }
 
+void MyPass1::initializeCallbacks(Module &M){
+	IRBuilder<> IRB(*context);
+	Function *hook;
+	Constant *hookFunc;
+	for(size_t isWriteAccess = 0; isWriteAccess <= 1; isWriteAccess++){
+		for(size_t accessSizeIndex = 0; accessSizeIndex < nAccessSizes; accessSizeIndex++){
+			std::string funcName;
+			if(isWriteAccess){
+				funcName = std::string("store_") + itostr(1 << accessSizeIndex) + "_bytes";
+			}
+			else{
+				funcName = std::string("load_") + itostr(1 << accessSizeIndex) + "_bytes";
+			}
+			hookFunc = M.getOrInsertFunction( funcName, FunctionType::get(IRB.getVoidTy(), {intPtrType}, false) );
+			hook = cast<Function>(hookFunc);
+			accessCallbacks[isWriteAccess][accessSizeIndex] = hook;
+		}
+	}
+}
 
+/*
 Function* MyPass1::checkInterfaceFunction(Constant *FuncOrBitcast){
 	if (isa<Function>(FuncOrBitcast))
 		return cast<Function>(FuncOrBitcast);
-}
+}*/
 
 //get memory access address(type:Value*) of all load/store instructions. 
-Value* MyPass1::isInterestingMemoryAccess(Instruction *ins, bool *isWrite){
+Value *MyPass1::isInterestingMemoryAccess(Instruction *ins, bool *isWrite, uint64_t *typeSize){
+	const DataLayout &DL  = ins->getModule()->getDataLayout();
+
 	if(LoadInst *LI = dyn_cast<LoadInst>(ins)){
 		*isWrite = false;
+		*typeSize = DL.getTypeStoreSizeInBits(LI->getType());
 		return LI -> getPointerOperand();
 	}
 	if(StoreInst *SI = dyn_cast<StoreInst>(ins)){
 		*isWrite = true;
+		*typeSize = DL.getTypeStoreSizeInBits(SI->getValueOperand()->getType());
 		return SI -> getPointerOperand();
 	}
 	if(AtomicRMWInst *RMW = dyn_cast<AtomicRMWInst>(ins)){
 		*isWrite = true;
+		*typeSize = DL.getTypeStoreSizeInBits(RMW->getValOperand()->getType());
 		return RMW -> getPointerOperand();
 	}
 	if(AtomicCmpXchgInst *XCHG = dyn_cast<AtomicCmpXchgInst>(ins)){
 		*isWrite = true;
+		*typeSize = DL.getTypeStoreSizeInBits(XCHG->getCompareOperand()->getType());
 		return XCHG -> getPointerOperand();
 	}
-	return NULL;
+	return nullptr;
 }
 
+/*
 //instrument interesing memory access
 void MyPass1::instrumentMemoryAccess(Instruction *ins){
 	bool isWrite = false;
@@ -199,12 +235,16 @@ void MyPass1::instrumentMemoryAccess(Instruction *ins){
 
     IRBuilder<> IRB(ins);
     instrumentSpecificAccess(ins, IRB, addr, typeSize, isWrite);
-}
+}*/
 
+
+/*
 //instrument specific memory access(load/store(addr != NULL) && typeSize=8/16/32/64/128 bits))
 void MyPass1::instrumentSpecificAccess(Instruction *ins, IRBuilder<> &IRB, Value *addr, uint32_t typeSize, bool isWrite){
 	size_t accessSizeIndex = typeSize2accessSizeIndex(typeSize);
-    Value * actualAddr = IRB.CreatePointerCast(addr, intptrType);
+//    Value * actualAddr = IRB.CreatePointerCast(addr, intptrType);
+	//just for test
+	Value *actualAddr = addr;
 	insertAccessCallback(ins, actualAddr, isWrite, accessSizeIndex);
 }
 
@@ -212,17 +252,18 @@ Instruction* MyPass1::insertAccessCallback( Instruction *insertBefore, Value *ad
 	IRBuilder<> IRB(insertBefore);
 	CallInst *call = IRB.CreateCall(accessCallback[isWrite][accessSizeArrayIndex], addr);
 	return call;
-}
+}*/
 
 
 
 //transfer typeSize to accessSizeIndex eg:typeSize = 32bits = 4Bytes = 0x100 Bytes, accessSizeIndex = 2 
-static size_t typeSize2accessSizeIndex(uint32_t typeSize){
-	size_t sizeIndex = countTrailingZeros_32(typeSize / 8);
+static size_t typeSize2accessSizeIndex(uint64_t typeSize){
+	size_t sizeIndex = countTrailingZeros(typeSize / 8);
 	assert(sizeIndex < nAccessSizes);
 	return sizeIndex;
 }
 
+/*
 //count the number of trailing zeros
 static size_t countTrailingZeros_32(uint32_t nBytes){
     size_t nZeros = 0;
@@ -231,6 +272,47 @@ static size_t countTrailingZeros_32(uint32_t nBytes){
 		nZeros++;
 	}
 	return nZeros;
+}*/
+
+bool MyPass1::instrumentMemAccess(Instruction *ins){
+	uint64_t typeSize = 0;
+	bool isWrite = false;
+	Value *addr, *addrLong;
+	addr = isInterestingMemoryAccess(ins, &isWrite, &typeSize);
+	
+	if(!addr)
+		return false;
+
+	IRBuilder<> IRB(ins);
+    addrLong = IRB.CreatePointerCast(addr, intPtrType);
+	size_t accessSizeIndex = typeSize2accessSizeIndex(typeSize);
+	IRB.CreateCall(accessCallbacks[isWrite][accessSizeIndex], addrLong);
+
+	return true;
+}
+
+bool MyPass1::runOnFunction(Function &F){
+	initializeCallbacks(*F.getParent());
+	bool hasChanged = false;
+	SmallVector<Instruction* , 16> toInstrument;
+
+	for(auto &BB : F){
+		for(auto &Inst : BB){
+			bool isWrite;
+			uint64_t typeSize;
+			Value *addr = isInterestingMemoryAccess(&Inst, &isWrite, &typeSize);
+
+			if(addr){
+				errs() << "Addr is:" << addr <<"       *Addr is:" << *addr << "     typeSize is: " << typeSize << "\n";
+				toInstrument.push_back(&Inst);
+			}
+		}
+	}
+
+	for(auto Inst : toInstrument)
+		hasChanged |= instrumentMemAccess(Inst);
+
+	return hasChanged;
 }
 
 bool MyPass1::doFinalization(Module &M){
